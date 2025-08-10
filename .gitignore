@@ -1,0 +1,30 @@
+# Python cache / temp files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Output files
+*.xlsx
+*.zip
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE project files
+.vscode/
+.idea/
+*.iml
