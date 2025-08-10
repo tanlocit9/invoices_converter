@@ -1,22 +1,33 @@
 import os
 import re
+import json
 import pdfplumber
 import pandas as pd
-from datetime import datetime
 import logging
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
-# === Configuration ===
-PDF_FOLDER = "./invoices"  # Folder containing your PDFs
-OUTPUT_FILE = "combined_invoices.xlsx"
-ORDER_DATE_DEFAULT = "01-07-2025"  # Optional default value
+# === Load config.json ===
+# Detect base directory: when running as exe, use folder of the exe, else script folder
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+PDF_FOLDER = os.path.join(BASE_DIR, config.get("PDF_FOLDER", "invoices"))
+OUTPUT_FILE = os.path.join(BASE_DIR, config.get("OUTPUT_FILE", "combined_invoices.xlsx"))
+ORDER_DATE_DEFAULT = config.get("ORDER_DATE_DEFAULT", "")
+SKIP_FREE_GIFTS = config.get("SKIP_FREE_GIFTS", True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-SKIP_FREE_GIFTS = True  # Set to False if you want to include gifts
 
 all_rows = []
 
-# === Loop through all PDFs ===
+# === Process all PDFs in folder ===
 for filename in os.listdir(PDF_FOLDER):
     if filename.lower().endswith(".pdf"):
         pdf_path = os.path.join(PDF_FOLDER, filename)
@@ -28,11 +39,13 @@ for filename in os.listdir(PDF_FOLDER):
                 text = page.extract_text()
                 tables = page.extract_tables()
 
-            # === Extract Invoice Metadata ===
+            # === Invoice metadata ===
             series_match = re.search(r'Ký hiệu \(Series\):\s*(\S+)', text)
             series = series_match.group(1) if series_match else ""
+
             number_match = re.search(r'(\d{6,8})\s*Số\s*\(No\.\)', text)
             number = number_match.group(1) if number_match else ""
+
             invoice_number = f"{number}.{series}" if number and series else ""
 
             date_match = re.search(r'Ngày \(Date\) (\d{1,2}) tháng \(month\) (\d{1,2}) năm \(year\) (\d{4})', text)
@@ -51,7 +64,7 @@ for filename in os.listdir(PDF_FOLDER):
             total_with_vat = re.search(r'Tổng cộng tiền thanh toán.*?:\s+([\d.]+)', text)
             total_after_tax = total_with_vat.group(1).replace(".", "") if total_with_vat else ""
 
-            # === Extract Product Rows ===
+            # === Products ===
             product_rows = []
             for t in tables:
                 for row in t:
@@ -67,21 +80,20 @@ for filename in os.listdir(PDF_FOLDER):
                 continue
 
             for i, row in enumerate(product_rows):
+                product_name = row[2].replace("\n", " ").strip()
+
+                if SKIP_FREE_GIFTS and "hàng tặng không bán" in product_name.lower():
+                    logging.info(f"⏭️ Skipping gift row: {product_name}")
+                    continue
+
                 try:
                     product_code = row[1]
-                    product_name = row[2].replace("\n", " ").strip()
-                    
-                    # 🔥 Skip "hàng tặng không bán"
-                    if SKIP_FREE_GIFTS and "hàng tặng không bán" in product_name.lower():
-                        logging.info(f"⏭️ Skipping gift row: {product_name}")
-                        continue
-
                     unit = row[3]
                     quantity = float(row[4])
                     unit_price = float(row[5].replace(",", "").replace(".", ""))
                     total = float(row[6].replace(",", "").replace(".", ""))
                 except Exception as e:
-                    logging.error(f"❌ Error in product row {i}: {row} → {e}")
+                    logging.error(f"❌ Error parsing product row {i}: {row} → {e}")
                     continue
 
                 all_rows.append({
@@ -100,64 +112,26 @@ for filename in os.listdir(PDF_FOLDER):
                     "VAT %": vat_percent if i == 0 else "",
                     "Tiền thuế (vnđ)": vat_amount if i == 0 else "",
                     "Thành tiền sau thuế (vnđ)": total_after_tax if i == 0 else "",
-                    "Ghi chú": "TRUE",
+                    "Ghi chú": f"={get_column_letter(16)}{{row}}={get_column_letter(11)}{{row}}",  # Placeholder formula
                     "Đơn giá bán (HD)": unit_price
                 })
 
         except Exception as e:
             logging.error(f"💥 Failed to process {filename}: {e}")
 
-# === Write to Excel ===
+# === Save to Excel ===
 df = pd.DataFrame(all_rows)
 df.to_excel(OUTPUT_FILE, index=False)
 
-# Now insert dynamic formulas into "Ghi chú" column
+# === Add real formulas for Ghi chú column ===
 wb = load_workbook(OUTPUT_FILE)
 ws = wb.active
+ghi_chu_col = [cell.value for cell in ws[1]].index("Ghi chú") + 1
+col_q = [cell.value for cell in ws[1]].index("Đơn giá bán (HD)") + 1
+col_k = [cell.value for cell in ws[1]].index("Đơn giá bán (vnđ)") + 1
 
-# Find column indexes
-headers = [cell.value for cell in ws[1]]
-ghi_chu_col = headers.index("Ghi chú") + 1  # Excel columns are 1-based
-col_Q = headers.index("Đơn giá bán (HD)") + 1
-col_K = headers.index("Đơn giá bán (vnđ)") + 1
-
-for row in range(2, ws.max_row + 1):
-    cell_ref_q = f"{chr(64 + col_Q)}{row}"  # e.g., Q15
-    cell_ref_k = f"{chr(64 + col_K)}{row}"  # e.g., K15
-    formula = f"={cell_ref_q}={cell_ref_k}"
-    ws.cell(row=row, column=ghi_chu_col).value = formula
+for r in range(2, ws.max_row + 1):
+    ws.cell(row=r, column=ghi_chu_col).value = f"={get_column_letter(col_q)}{r}={get_column_letter(col_k)}{r}"
 
 wb.save(OUTPUT_FILE)
-logging.info(f"✅ Saved all invoices to {OUTPUT_FILE}")
-
-# === Merge invoice-level fields in Excel ===
-from openpyxl import load_workbook
-
-merge_columns = [
-    "Ngày đặt hàng", "Ngày hóa đơn", "Số hóa đơn", "Tên khách hàng", "Tên đơn vị", "Địa chỉ",
-    "Thành tiền trước thuế (vnđ)", "VAT %", "Tiền thuế (vnđ)", "Thành tiền sau thuế (vnđ)"
-]
-
-wb = load_workbook(OUTPUT_FILE)
-ws = wb.active
-header = [cell.value for cell in ws[1]]
-merge_col_indexes = {col: header.index(col) + 1 for col in merge_columns}
-
-start_row = 2
-while start_row <= ws.max_row:
-    invoice = ws.cell(row=start_row, column=merge_col_indexes["Số hóa đơn"]).value
-    end_row = start_row
-    while (
-        end_row + 1 <= ws.max_row and
-        ws.cell(row=end_row + 1, column=merge_col_indexes["Số hóa đơn"]).value in [None, "", invoice]
-    ):
-        end_row += 1
-
-    for col, idx in merge_col_indexes.items():
-        if end_row > start_row:
-            ws.merge_cells(start_row=start_row, start_column=idx, end_row=end_row, end_column=idx)
-
-    start_row = end_row + 1
-
-wb.save(OUTPUT_FILE)
-logging.info("✅ Merged invoice-level cells in Excel.")
+logging.info(f"✅ All done! Saved to {OUTPUT_FILE}")
