@@ -1,6 +1,0 @@
-{
-    "PDF_FOLDER": "invoices",
-    "OUTPUT_FILE": "combined_invoices.xlsx",
-    "ORDER_DATE_DEFAULT": "01-07-2025",
-    "SKIP_FREE_GIFTS": false
-}
